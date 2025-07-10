@@ -1,0 +1,692 @@
+import React, { useState, useEffect, Component, useRef, useMemo } from 'react';
+import { LiveProvider, LiveError, LivePreview } from 'react-live';
+import PropTypes from 'prop-types';
+import { useMediaQuery } from "react-responsive";
+import axios from 'axios';
+import { createStore } from "redux";
+import { Provider, useDispatch, useSelector } from "react-redux";
+
+import { Card, CardBody, CardHeader, Button, Image, Text, Stack, Flex, Spacer, Box,ChakraProvider  } from '@chakra-ui/react'
+
+
+import { 
+  BrowserRouter, 
+  Router,
+  Routes, 
+  Route, 
+  Link, 
+  useNavigate, 
+  useParams, 
+  useLocation 
+} from 'react-router-dom';
+
+// Error Boundary Component
+class PreviewErrorBoundary extends Component {
+  state = {
+    error: null,
+    errorInfo: null,
+  };
+
+  componentDidCatch(error, errorInfo) {
+    console.error('Error in LivePreviewComponent:', error, errorInfo);
+    this.setState({ error, errorInfo });
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="p-4 bg-red-50 text-red-700 rounded-md">
+          <h3 className="text-lg font-medium">Error in Component Preview</h3>
+          <p className="mt-2 text-sm">{this.state.error.toString()}</p>
+          <details className="mt-2 text-xs whitespace-pre-wrap">
+            <summary>Stack Trace</summary>
+            {this.state.errorInfo?.componentStack}
+          </details>
+          <p className="mt-2 text-sm">
+            Please check the component code or try a different prop set.
+          </p>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// Module dependency detector with improved regex
+const detectModuleDependencies = (code) => {
+  // More robust regex to handle various import patterns
+  const importMatches = code.match(/import\s+(?:(?:\{[^}]*\})|(?:[^{}\s,]+))(?:\s*,\s*(?:\{[^}]*\}|[^{}\s,]+))*\s+from\s+['"]([^'"]+)['"]/g) || [];
+  const requireMatches = code.match(/(?:const|let|var)\s+(?:\w+|\{[^}]*\})\s*=\s*require\(['"]([^'"]+)['"]\)/g) || [];
+  
+  const modules = new Set();
+  
+  // Extract module names from import statements
+  importMatches.forEach(match => {
+    const moduleMatch = match.match(/from\s+['"]([^'"./][^'"]+)['"]/);
+    if (moduleMatch && moduleMatch[1]) {
+      modules.add(moduleMatch[1]);
+    }
+  });
+  
+  // Extract module names from require statements
+  requireMatches.forEach(match => {
+    const moduleMatch = match.match(/require\(['"]([^'"./][^'"]+)['"]\)/);
+    if (moduleMatch && moduleMatch[1]) {
+      modules.add(moduleMatch[1]);
+    }
+  });
+  
+  return Array.from(modules);
+};
+
+const LivePreviewComponent = ({ selectedComponentName, allComponents }) => {
+  const [code, setCode] = useState('');
+  const [theme, setTheme] = useState('light');
+  const [layout, setLayout] = useState('centered');
+  const [devicePreview, setDevicePreview] = useState('desktop');
+  const [showControls, setShowControls] = useState(true);
+  const [propSet, setPropSet] = useState('default');
+  const [missingModules, setMissingModules] = useState([]);
+  const [dynamicProps, setDynamicProps] = useState({});
+  const [parseError, setParseError] = useState(null);
+
+  // Built-in modules that are already available
+  const availableModules = [
+    'react', 'react-dom', 'react-router-dom', 'prop-types',
+    // Add other modules that are pre-installed in your app
+  ];
+
+  // Define mock prop sets for testing
+  const propSets = {
+    default: {
+      title: 'Sample Title',
+      items: ['Item 1', 'Item 2', 'Item 3'],
+      data: { id: 1, name: 'Sample Data' },
+      text: 'Sample Text',
+      count: 5,
+      isActive: true,
+    },
+    alternate: {
+      title: 'Alternate Title',
+      items: ['Apple', 'Banana', 'Orange'],
+      data: { id: 2, name: 'Alternate Data' },
+      text: 'Alternate Text',
+      count: 10,
+      isActive: false,
+    },
+    empty: {
+      title: '',
+      items: [],
+      data: {},
+      text: '',
+      count: 0,
+      isActive: false,
+    },
+  };
+
+  // Custom prop editor
+  const [showPropEditor, setShowPropEditor] = useState(false);
+  const [customProps, setCustomProps] = useState({});
+  const [propEditMode, setPropEditMode] = useState('default');
+
+  // Navigation and click handlers
+  function handleNavigation(e, target) {
+    if (e && e.preventDefault) e.preventDefault();
+    console.log('Navigation requested to:', target);
+    alert(`Navigation to: ${target} - In preview mode navigation is simulated`);
+  }
+
+  function handleClick(e, action) {
+    if (e && e.preventDefault) e.preventDefault();
+    console.log('Button clicked:', action);
+    alert(`Button clicked: ${action} - Action simulated in preview mode`);
+  }
+
+  // Function to handle array methods properly
+  const createArrayHelpers = () => {
+    return `
+      // Array helper functions
+      function safeMap(arr, fn) {
+        if (!arr || !Array.isArray(arr)) return [];
+        return arr.map(fn);
+      }
+      
+      function safeFilter(arr, fn) {
+        if (!arr || !Array.isArray(arr)) return [];
+        return arr.filter(fn);
+      }
+      
+      function safeFind(arr, fn) {
+        if (!arr || !Array.isArray(arr)) return undefined;
+        return arr.find(fn);
+      }
+      
+      function safeJoin(arr, separator) {
+        if (!arr || !Array.isArray(arr)) return '';
+        return arr.join(separator);
+      }
+      
+      function safeLength(arr) {
+        if (!arr || !Array.isArray(arr)) return 0;
+        return arr.length;
+      }
+      
+      // Object helper functions
+      function safeAccess(obj, path) {
+        if (!obj) return undefined;
+        const keys = path.split('.');
+        let result = obj;
+        for (const key of keys) {
+          if (result === null || result === undefined) return undefined;
+          result = result[key];
+        }
+        return result;
+      }
+    `;
+  };
+
+  // Sanitize component code to make it more likely to work in the live preview
+  const sanitizeComponentCode = (name, componentCode) => {
+    try {
+      // Skip if no code
+      if (!componentCode || typeof componentCode !== 'string') {
+        console.warn(`Invalid component code for ${name}`);
+        return `function ${name}() { return <div>Invalid component: ${name}</div>; }`;
+      }
+
+      // Handle various export formats
+      let processedCode = componentCode
+        // Remove import statements
+        .replace(/import\s+.*?from\s+['"].*?['"];?\s*/g, '')
+        .replace(/const\s+\w+\s*=\s*require\(['"].*?['"]\);?/g, '')
+        
+        // Remove export statements in many variants
+        .replace(/export\s+default\s+\w+\s*;?/g, '')
+        .replace(/export\s+default\s+function\s+/, 'function ')
+        .replace(/export\s+default\s+class\s+/, 'class ')
+        .replace(/export\s+default\s+const\s+/, 'const ')
+        .replace(/export\s+{\s*(\w+)(?:\s+as\s+\w+)?\s*};?/g, '')
+        .replace(/export\s+function\s+/, 'function ')
+        .replace(/export\s+const\s+/, 'const ')
+        .replace(/export\s+let\s+/, 'let ')
+        .replace(/export\s+var\s+/, 'var ')
+        
+        // Handle various function formats (arrow, function, etc.)
+        .replace(/const\s+(\w+)\s*=\s*\(([^)]*)\)\s*=>\s*(?!\s*{)/, 'function $1($2) { return ')
+        .replace(/const\s+(\w+)\s*=\s*\(([^)]*)\)\s*=>\s*{/, 'function $1($2) {')
+        
+        // Replace array methods with safe versions
+        .replace(/(\w+)\.map\(/g, 'safeMap($1, ')
+        .replace(/(\w+)\.filter\(/g, 'safeFilter($1, ')
+        .replace(/(\w+)\.find\(/g, 'safeFind($1, ')
+        .replace(/(\w+)\.join\(/g, 'safeJoin($1, ')
+        .replace(/(\w+)\.length/g, 'safeLength($1)')
+        
+        // Convert inline cursor style to Tailwind class
+        .replace(/style={{(?:.*?)cursor:\s*['"]pointer['"](?:.*?)}}/g, (match) => {
+          if (match.includes(',')) {
+            return (
+              match
+                .replace(/cursor:\s*['"]pointer['"],?\s*/, '')
+                .replace(/,\s*}/, '}')
+                + ' className="cursor-pointer"'
+            );
+          }
+          return 'className="cursor-pointer"';
+        })
+        .trim();
+
+      // Check if it's an arrow function without return
+      if (processedCode.includes('=>') && !processedCode.includes('return')) {
+        // Add missing brackets and return if it's a concise body arrow function
+        processedCode = processedCode.replace(
+          /(\w+)\s*=\s*\(([^)]*)\)\s*=>\s*([^{].*?)(;|\s*$)/,
+          '$1 = ($2) => { return $3; }'
+        );
+      }
+
+      // If component has no function declaration, wrap it
+      if (!processedCode.includes('function') && !processedCode.includes('class') && !processedCode.includes('=>')) {
+        processedCode = `function ${name}(props) { 
+          return (${processedCode}); 
+        }`;
+      }
+
+      // Add missing `props` parameter if needed
+      if (processedCode.includes('function') && !processedCode.includes('props')) {
+        processedCode = processedCode.replace(
+          /function\s+(\w+)\s*\(\s*\)/,
+          'function $1(props)'
+        );
+      }
+
+      // Add trailing semicolon for proper chaining
+      if (!processedCode.endsWith(';')) {
+        processedCode += ';';
+      }
+
+      return processedCode;
+    } catch (err) {
+      console.error(`Error sanitizing component ${name}:`, err);
+      return `function ${name}() { return <div>Error in component: ${err.message}</div>; }`;
+    }
+  };
+
+  // Safer combine code function
+  const prepareCombinedCode = () => {
+    if (!allComponents || Object.keys(allComponents).length === 0) {
+      console.log('No components available');
+      return '() => <div>No components available</div>';
+    }
+
+    try {
+      let combinedCode = '';
+      let detectedModules = [];
+
+      // Add helper functions for arrays and objects
+      combinedCode += createArrayHelpers();
+
+      // Process all components
+      for (const [name, componentCode] of Object.entries(allComponents)) {
+        // Detect required modules before removing imports
+        const moduleNames = detectModuleDependencies(componentCode);
+        detectedModules = [...detectedModules, ...moduleNames];
+
+        // Process component code with better sanitization
+        const sanitized = sanitizeComponentCode(name, componentCode);
+        combinedCode += sanitized + '\n\n';
+      }
+
+      // Filter for missing modules
+      const missing = detectedModules.filter(module => 
+        !availableModules.includes(module)
+      );
+      setMissingModules(missing);
+
+      // Add handlers
+      combinedCode += `
+        // Event handlers
+        function handleNavigation(e, target) {
+          if (e && e.preventDefault) e.preventDefault();
+          console.log('Navigation requested to:', target);
+          alert('Navigation to: ' + target + ' - In preview mode navigation is simulated');
+        }
+        
+        function handleClick(e, action) {
+          if (e && e.preventDefault) e.preventDefault();
+          console.log('Button clicked:', action);
+          alert('Button clicked: ' + action + ' - Action simulated in preview mode');
+        }
+      `;
+
+      // Determine which props to use based on mode
+      const activeProps = propEditMode === 'custom' ? customProps : propSets[propSet];
+      setDynamicProps(activeProps);
+
+      // Render the selected component with props
+      if (selectedComponentName) {
+        // Build props dynamically as a JavaScript object, not hardcoded strings
+        combinedCode += `
+          // Create props object dynamically
+          const componentProps = ${JSON.stringify(activeProps)};
+          
+          // Attach event handlers
+          componentProps.onNavigate = handleNavigation;
+          componentProps.onClick = handleClick;
+          
+          // Wrap in error boundary
+          try {
+            if (typeof ${selectedComponentName} !== 'function') {
+              render(<div>Component "${selectedComponentName}" is not a valid function</div>);
+            } else {
+              render(
+                <div className="preview-wrapper">
+                  {React.createElement(${selectedComponentName}, componentProps)}
+                </div>
+              );
+            }
+          } catch (err) {
+            render(<div>Error rendering component: {err.message}</div>);
+          }
+        `;
+      } else {
+        combinedCode += 'render(<div>Select a component to preview</div>);';
+      }
+
+      // Clear any previous parse errors
+      setParseError(null);
+      return combinedCode;
+    } catch (err) {
+      console.error('Error combining component code:', err);
+      setParseError(err.message);
+      return `render(<div>Error preparing component: ${err.message}</div>);`;
+    }
+  };
+
+  useEffect(() => {
+    const combined = prepareCombinedCode();
+    setCode(combined);
+  }, [selectedComponentName, allComponents, propSet, propEditMode, customProps]);
+
+  // Handle custom prop changes
+  const handlePropChange = (key, value) => {
+    setCustomProps(prev => ({
+      ...prev,
+      [key]: value
+    }));
+  };
+
+  // Theme, layout, and device classes
+  const getThemeClasses = () => {
+    switch (theme) {
+      case 'dark': return 'bg-gray-900 text-white';
+      case 'blue': return 'bg-blue-50 text-blue-900';
+      case 'green': return 'bg-green-50 text-green-900';
+      case 'purple': return 'bg-purple-50 text-purple-900';
+      default: return 'bg-white text-gray-900';
+    }
+  };
+
+  const getLayoutClasses = () => {
+    switch (layout) {
+      case 'fullbleed': return 'p-0';
+      case 'left': return 'flex justify-start p-4';
+      case 'right': return 'flex justify-end p-4';
+      default: return 'flex justify-center p-4';
+    }
+  };
+
+  const getDeviceClasses = () => {
+    switch (devicePreview) {
+      case 'mobile': return 'max-w-sm mx-auto border-2 border-gray-300 rounded-xl p-2 h-96 overflow-y-auto';
+      case 'tablet': return 'max-w-md mx-auto border-2 border-gray-300 rounded-lg p-2 h-96 overflow-y-auto';
+      case 'small-desktop': return 'max-w-2xl mx-auto border border-gray-200 rounded-lg p-2 h-96 overflow-y-auto';
+      default: return 'w-full border border-gray-200 rounded-lg h-96 overflow-y-auto';
+    }
+  };
+
+  // Render a basic form for editing props
+  const renderPropEditor = () => {
+    if (!showPropEditor) return null;
+    
+    return (
+      <div className="border border-gray-200 rounded-md p-3 mb-3 bg-gray-50">
+        <div className="flex justify-between mb-2">
+          <h4 className="font-medium text-sm">Custom Props Editor</h4>
+          <button 
+            onClick={() => setShowPropEditor(false)}
+            className="text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 px-2 py-1 rounded"
+          >
+            Close
+          </button>
+        </div>
+        
+        <div className="grid grid-cols-2 gap-2 text-sm">
+          {Object.entries(propSets.default).map(([key, value]) => {
+            // Different input types based on prop type
+            if (typeof value === 'boolean') {
+              return (
+                <div key={key} className="col-span-1">
+                  <label className="block text-xs text-gray-600 mb-1">{key}</label>
+                  <select 
+                    value={customProps[key] ? 'true' : 'false'} 
+                    onChange={(e) => handlePropChange(key, e.target.value === 'true')}
+                    className="w-full text-xs rounded border border-gray-300 p-1"
+                  >
+                    <option value="true">True</option>
+                    <option value="false">False</option>
+                  </select>
+                </div>
+              );
+            } else if (typeof value === 'number') {
+              return (
+                <div key={key} className="col-span-1">
+                  <label className="block text-xs text-gray-600 mb-1">{key}</label>
+                  <input 
+                    type="number" 
+                    value={customProps[key] !== undefined ? customProps[key] : value}
+                    onChange={(e) => handlePropChange(key, Number(e.target.value))}
+                    className="w-full text-xs rounded border border-gray-300 p-1"
+                  />
+                </div>
+              );
+            } else if (typeof value === 'string') {
+              return (
+                <div key={key} className="col-span-1">
+                  <label className="block text-xs text-gray-600 mb-1">{key}</label>
+                  <input 
+                    type="text" 
+                    value={customProps[key] !== undefined ? customProps[key] : value}
+                    onChange={(e) => handlePropChange(key, e.target.value)}
+                    className="w-full text-xs rounded border border-gray-300 p-1"
+                  />
+                </div>
+              );
+            } else if (Array.isArray(value)) {
+              return (
+                <div key={key} className="col-span-2">
+                  <label className="block text-xs text-gray-600 mb-1">{key} (comma-separated)</label>
+                  <input 
+                    type="text" 
+                    value={(customProps[key] || value).join(', ')}
+                    onChange={(e) => handlePropChange(key, e.target.value.split(',').map(i => i.trim()))}
+                    className="w-full text-xs rounded border border-gray-300 p-1"
+                  />
+                </div>
+              );
+            } else if (typeof value === 'object') {
+              return (
+                <div key={key} className="col-span-2">
+                  <label className="block text-xs text-gray-600 mb-1">{key} (JSON)</label>
+                  <textarea 
+                    value={customProps[key] !== undefined ? JSON.stringify(customProps[key], null, 2) : JSON.stringify(value, null, 2)}
+                    onChange={(e) => {
+                      try {
+                        const parsed = JSON.parse(e.target.value);
+                        handlePropChange(key, parsed);
+                      } catch (err) {
+                        // Don't update if invalid JSON
+                      }
+                    }}
+                    className="w-full text-xs rounded border border-gray-300 p-1 h-20 font-mono"
+                  />
+                </div>
+              );
+            }
+            return null;
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // Missing modules notification
+  const renderMissingModulesWarning = () => {
+    if (!missingModules.length) return null;
+    
+    return (
+      <div className="mb-3 p-3 bg-yellow-50 text-yellow-800 border border-yellow-200 rounded-md">
+        <h4 className="font-medium text-sm mb-1">External Module Dependencies Detected</h4>
+        <p className="text-xs mb-2">
+          The component requires these modules that aren't available in the preview:
+        </p>
+        <ul className="list-disc pl-5 text-xs space-y-1">
+          {missingModules.map(module => (
+            <li key={module}>{module}</li>
+          ))}
+        </ul>
+        <div className="mt-2 text-xs">
+          <p>Install commands:</p>
+          <pre className="bg-gray-100 p-1 rounded mt-1 overflow-x-auto">
+            npm install {missingModules.join(' ')}
+          </pre>
+          <p className="mt-1">or</p>
+          <pre className="bg-gray-100 p-1 rounded mt-1 overflow-x-auto">
+            yarn add {missingModules.join(' ')}
+          </pre>
+        </div>
+      </div>
+    );
+  };
+
+  // Parse error display
+  const renderParseError = () => {
+    if (!parseError) return null;
+    
+    return (
+      <div className="mb-3 p-3 bg-red-50 text-red-700 border border-red-200 rounded-md">
+        <h4 className="font-medium text-sm mb-1">Parse Error</h4>
+        <p className="text-xs">{parseError}</p>
+      </div>
+    );
+  };
+
+  return (
+    <PreviewErrorBoundary>
+      <div className="relative h-full w-full">
+        {showControls && (
+          <div className="flex flex-wrap items-center justify-between mb-3 gap-2">
+            <div className="flex space-x-2">
+              <select
+                value={theme}
+                onChange={(e) => setTheme(e.target.value)}
+                className="text-xs rounded border border-gray-300 py-1 px-2 bg-white text-gray-700 cursor-pointer"
+              >
+                <option value="light">Light Theme</option>
+                <option value="dark">Dark Theme</option>
+                <option value="blue">Blue Theme</option>
+                <option value="green">Green Theme</option>
+                <option value="purple">Purple Theme</option>
+              </select>
+              <select
+                value={layout}
+                onChange={(e) => setLayout(e.target.value)}
+                className="text-xs rounded border border-gray-300 py-1 px-2 bg-white text-gray-700 cursor-pointer"
+              >
+                <option value="centered">Centered</option>
+                <option value="fullbleed">Full Bleed</option>
+                <option value="left">Left Aligned</option>
+                <option value="right">Right Aligned</option>
+              </select>
+              <select
+                value={devicePreview}
+                onChange={(e) => setDevicePreview(e.target.value)}
+                className="text-xs rounded border border-gray-300 py-1 px-2 bg-white text-gray-700 cursor-pointer"
+              >
+                <option value="desktop">Desktop</option>
+                <option value="small-desktop">Small Desktop</option>
+                <option value="tablet">Tablet</option>
+                <option value="mobile">Mobile</option>
+              </select>
+              <select
+                value={propEditMode}
+                onChange={(e) => setPropEditMode(e.target.value)}
+                className="text-xs rounded border border-gray-300 py-1 px-2 bg-white text-gray-700 cursor-pointer"
+              >
+                <option value="default">Default Props</option>
+                <option value="alternate">Alternate Props</option>
+                <option value="empty">Empty Props</option>
+                <option value="custom">Custom Props</option>
+              </select>
+              {propEditMode === 'custom' && (
+                <button
+                  onClick={() => setShowPropEditor(true)}
+                  className="text-xs bg-blue-50 hover:bg-blue-100 text-blue-600 py-1 px-2 rounded flex items-center"
+                >
+                  Edit Props
+                </button>
+              )}
+            </div>
+            <button
+              onClick={() => setShowControls(false)}
+              className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 py-1 px-2 rounded flex items-center cursor-pointer"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 mr-1" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+              </svg>
+              Hide Controls
+            </button>
+          </div>
+        )}
+        {!showControls && (
+          <button
+            onClick={() => setShowControls(true)}
+            className="absolute top-2 right-2 z-20 text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 py-1 px-2 rounded opacity-50 hover:opacity-100 cursor-pointer"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+            </svg>
+          </button>
+        )}
+        
+        {renderParseError()}
+        {renderMissingModulesWarning()}
+        {renderPropEditor()}
+        
+        <LiveProvider
+          code={code}
+          scope={{
+            axios,
+            React,
+            useState,
+            useEffect,
+            useRef,
+            useMemo,
+            Component,
+            PropTypes,
+            BrowserRouter,
+            Router,
+            Routes,
+            Route,
+            Link,
+            useNavigate,
+            useParams,
+            useLocation,
+            useMediaQuery,
+            // Include proper Array methods
+            Array,
+            String,
+            Object,
+            JSON,
+            Number,
+            Boolean,
+            Map,
+            Set,
+            Promise,
+            console,
+            Card, CardBody, CardHeader, Button, Image, Text, Stack, Flex, Spacer, Box,ChakraProvider,
+            
+            
+            Provider, useDispatch, useSelector ,
+            createStore
+          }}
+          noInline={true}
+        >
+          <div className="mb-2">
+            <LiveError className="p-3 bg-red-50 text-red-700 rounded-md text-xs whitespace-pre-wrap" />
+          </div>
+          <div className={`relative w-full shadow-sm overflow-hidden transition-all duration-300 ${getThemeClasses()}`}>
+            <div className={`${getLayoutClasses()}`}>
+              <div className={`${getDeviceClasses()}`}>
+                {selectedComponentName ? (
+                  <LivePreview />
+                ) : (
+                  <div className="flex items-center justify-center h-full text-gray-400">
+                    <span>Select a component to preview</span>
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="absolute top-2 right-2 z-10">
+              <span className="bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-0.5 rounded-full">
+                Live Preview
+              </span>
+            </div>
+          </div>
+        </LiveProvider>
+      </div>
+    </PreviewErrorBoundary>
+  );
+};
+
+export default LivePreviewComponent;
