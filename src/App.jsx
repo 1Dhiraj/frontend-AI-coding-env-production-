@@ -3,7 +3,7 @@ import { Code, Play, Globe, Trash2, Copy, Check, Monitor, RefreshCw, AlertCircle
 import './App.css';
 
 // Real axios implementation for production
-const API_BASE_URL = 'http://localhost:8000'; // Update with your actual API base URL
+const API_BASE_URL = 'https://backend-ai-coding-env-production.onrender.com'; // Update with your actual API base URL
 
 // Toast notification component
 const Toast = ({ message, type, onClose }) => (
